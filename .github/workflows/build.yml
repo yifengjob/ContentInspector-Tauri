@@ -235,8 +235,8 @@ jobs:
         run: |
           Write-Host "=== Checking target directory ==="
           Get-ChildItem -Path "target/${{ matrix.target }}/release/" -Filter "*.exe" | Select-Object Name, Length
-          Write-Host "=== Checking if dataguard-scanner.exe exists ==="
-          Test-Path "target/${{ matrix.target }}/release/dataguard-scanner.exe"
+          Write-Host "=== Checking if ContentInspector.exe exists ==="
+          Test-Path "target/${{ matrix.target }}/release/ContentInspector.exe"
 
       # Upload artifacts
       - name: Upload Windows artifacts
@@ -276,7 +276,7 @@ jobs:
         shell: pwsh
         run: |
           $targetDir = "target/${{ matrix.target }}/release"
-          $exeFile = Join-Path $targetDir "dataguard-scanner.exe"
+          $exeFile = Join-Path $targetDir "ContentInspector.exe"
           if (Test-Path $exeFile) {
             $productName = "${{ steps.info.outputs.product_name }}"
             $version = "${{ steps.info.outputs.version }}"

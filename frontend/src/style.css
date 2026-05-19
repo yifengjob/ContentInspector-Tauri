@@ -17,31 +17,31 @@
   --scrollbar-track: #f1f1f1;
   --scrollbar-thumb: #888;
   --scrollbar-thumb-hover: #555;
-  
-  /* ========== 字体大小 - 固定值，避免 resize 时重新计算 ========= */
+
+  /* ========== 字体大小 - 固定值，避免 resize 时重新计算 ========== */
   --font-size-base: 14px;
   --font-size-sm: 12px;
   --font-size-lg: 16px;
   --font-size-xl: 18px;
   --font-size-xxl: 20px;
-    
-  /* ========== 间距系统 - 固定值 ========= */
-  --spacing-xs: 0.25rem;     /* 4px */
-  --spacing-sm: 0.5rem;      /* 8px */
-  --spacing-md: 0.75rem;     /* 12px */
-  --spacing-lg: 1rem;        /* 16px */
-  --spacing-xl: 1.5rem;      /* 24px */
-    
-  /* ========== 按钮尺寸系统 - 固定值 ========= */
-  --btn-min-size: 1.75rem;       /* 28px */
-  --btn-padding: 0.3125rem;      /* 5px */
-  --btn-icon-size: 0.9375rem;    /* 15px */
-    
-  /* ========== 圆角系统 - 固定值 ========= */
-  --radius-sm: 0.125rem;    /* 2px */
-  --radius-md: 0.25rem;     /* 4px */
-  --radius-lg: 0.5rem;      /* 8px */
-  
+
+  /* ========== 间距系统 - 固定值 ========== */
+  --spacing-xs: 0.25rem; /* 4px */
+  --spacing-sm: 0.5rem; /* 8px */
+  --spacing-md: 0.75rem; /* 12px */
+  --spacing-lg: 1rem; /* 16px */
+  --spacing-xl: 1.5rem; /* 24px */
+
+  /* ========== 按钮尺寸系统 - 固定值 ========== */
+  --btn-min-size: 1.75rem; /* 28px */
+  --btn-padding: 0.3125rem; /* 5px */
+  --btn-icon-size: 0.9375rem; /* 15px */
+
+  /* ========== 圆角系统 - 固定值 ========== */
+  --radius-sm: 0.125rem; /* 2px */
+  --radius-md: 0.25rem; /* 4px */
+  --radius-lg: 0.5rem; /* 8px */
+
   /* ========== 边框宽度 ========== */
   /* 边框保持固定像素，避免过细或过粗 */
   --border-width: 1px;
@@ -49,7 +49,7 @@
 }
 
 /* 暗色主题 */
-[data-theme="dark"] {
+[data-theme='dark'] {
   --primary-color: #177ddc;
   --success-color: #49aa19;
   --warning-color: #d89614;
@@ -77,15 +77,22 @@
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif, 'Microsoft YaHei', '微软雅黑';
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell',
+    'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif, 'Microsoft YaHei', '微软雅黑';
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   color: var(--text-color);
   background-color: var(--bg-color);
   overflow: hidden;
   font-size: var(--font-size-base);
+}
+
+/* 【UI优化】等宽字体类 */
+.mono-font {
+  font-family: 'SF Mono', 'Monaco', 'Consolas', 'Courier New', monospace;
+  font-variant-numeric: tabular-nums; /* 表格数字，确保对齐 */
+  font-size: calc(var(--font-size-base) * 0.9);
 }
 
 #app {
@@ -166,7 +173,89 @@ mark {
   background: var(--scrollbar-thumb-hover);
 }
 
+/* 响应式设计 - 已禁用，桌面应用不需要响应式 */
+/* @media (max-width: 1200px) {
+  :root {
+    --font-size-base: 13px;
+    --font-size-sm: 11px;
+    --font-size-lg: 15px;
+    --font-size-xl: 17px;
+    --font-size-xxl: 19px;
+  }
+}
 
+@media (min-width: 1201px) and (max-width: 1920px) {
+  :root {
+    --font-size-base: 14px;
+    --font-size-sm: 12px;
+    --font-size-lg: 16px;
+    --font-size-xl: 18px;
+    --font-size-xxl: 20px;
+  }
+}
+
+@media (min-width: 1921px) and (max-width: 2560px) {
+  :root {
+    --font-size-base: 15px;
+    --font-size-sm: 13px;
+    --font-size-lg: 17px;
+    --font-size-xl: 19px;
+    --font-size-xxl: 22px;
+  }
+}
+
+@media (min-width: 2561px) {
+  :root {
+    --font-size-base: 16px;
+    --font-size-sm: 14px;
+    --font-size-lg: 18px;
+    --font-size-xl: 20px;
+    --font-size-xxl: 24px;
+  }
+} */
+
+/* Retina/高DPI屏幕优化 - 已禁用，避免 clamp 重新计算 */
+/* @media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi) {
+  :root {
+    --btn-min-size: 1.875rem;
+    --btn-icon-size: 1rem;
+    --spacing-xs: 0.3125rem;
+    --spacing-sm: 0.5625rem;
+    --spacing-md: 0.8125rem;
+    --spacing-lg: 1.0625rem;
+    --spacing-xl: 1.5625rem;
+  }
+
+  body {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+} */
+
+/* 超高 DPI 屏幕 (3x+) - 已禁用 */
+/* @media (-webkit-min-device-pixel-ratio: 3), (min-resolution: 288dpi) {
+  :root {
+    --btn-min-size: 2rem;
+    --btn-icon-size: 1.0625rem;
+  }
+} */
+
+/* ========== macOS 系统特定优化 - 已禁用，避免 clamp 重新计算 ========== */
+/* body.platform-macos {
+  --font-size-base: 15px;
+  --font-size-sm: 13px;
+  --font-size-lg: 17px;
+
+  --btn-min-size: 2rem;
+  --btn-padding: 0.375rem;
+  --btn-icon-size: 1rem;
+  --spacing-xs: 0.3125rem;
+  --spacing-sm: 0.5625rem;
+  --spacing-md: 0.8125rem;
+  --spacing-lg: 1.0625rem;
+  --spacing-xl: 1.5625rem;
+} */
 
 /* 模态框响应式优化 - 小屏幕 */
 @media (max-width: 768px) {
@@ -174,4 +263,16 @@ mark {
     width: 95vw !important;
     max-height: 90vh !important;
   }
+}
+
+/* 【C6 优化】主题切换平滑过渡动画 */
+.theme-transitioning,
+.theme-transitioning *,
+.theme-transitioning *::before,
+.theme-transitioning *::after {
+  transition:
+    background-color 0.3s ease,
+    color 0.3s ease,
+    border-color 0.3s ease,
+    box-shadow 0.3s ease !important;
 }

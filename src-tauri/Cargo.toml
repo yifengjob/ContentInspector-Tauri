@@ -1,5 +1,5 @@
 [package]
-name = "dataguard-scanner"
+name = "content-inspector"
 version = "1.0.5"
 edition = "2024"
 
@@ -25,17 +25,43 @@ chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
 env_logger = "0.11"
 dirs = "6"
+
+# ZIP库（最新稳定版 8.6.0）
 zip = "8"
 
 # PDF 解析
 pdf-extract = "0.10"
+lopdf = "0.40"  # 【新增】支持真正流式PDF解析
+hex = "0.4"  # 【新增】用于PDF十六进制字符串解码
 
 # Office 文档解析
-calamine = "0.34"
+calamine = "0.35"
 
 # Excel 写入（用于导出报告）
-rust_xlsxwriter = "0.94"
+rust_xlsxwriter = "0.95"
+
+# 高性能 Office 文档解析器（支持旧版 DOC/PPT/XLS + 新版 OOXML + OpenDocument）
+# 启用所有格式支持：ole(旧版), ooxml(新版), odf(OpenDocument)
+litchi = { version = "0.0.1", features = ["odf"] }
+
+# RTF 富文本解析器
+rtf-parser = "0.4"
 
 # 系统信息获取
 num_cpus = "1"
 sys-info = "0.9"
+
+# 错误处理
+thiserror = "2"
+
+# 电源管理（防止锁屏/休眠）
+nosleep = "0.2"
+
+# Windows平台依赖
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+winapi = { version = "0.3", features = ["fileapi"] }
+
+# 测试依赖
+[dev-dependencies]
+tempfile = "3"

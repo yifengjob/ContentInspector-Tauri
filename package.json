@@ -1,11 +1,11 @@
 {
-  "name": "dataguard-scanner",
+  "name": "content-inspector",
   "version": "1.0.5",
   "private": true,
   "scripts": {
-    "dev": "pnpm --filter dataguard-scanner-frontend dev",
-    "build": "pnpm --filter dataguard-scanner-frontend build",
-    "preview": "pnpm --filter dataguard-scanner-frontend preview",
+    "dev": "pnpm --filter content-inspector-frontend dev",
+    "build": "pnpm --filter content-inspector-frontend build",
+    "preview": "pnpm --filter content-inspector-frontend preview",
     "version:update": "node scripts/update-version.js"
   }
 }

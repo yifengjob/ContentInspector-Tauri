@@ -2,7 +2,7 @@
 /// 根据操作系统平台生成默认的系统目录列表
 
 use std::env;
-use crate::config;
+use crate::utils::config;
 
 /// 获取基础系统目录（不包含其他磁盘）
 pub fn get_base_system_dirs() -> Vec<String> {

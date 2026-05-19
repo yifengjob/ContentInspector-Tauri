@@ -1,3 +1,121 @@
+<script setup lang="ts">
+  import { computed, onMounted, ref } from 'vue';
+  import { useAppStore } from '@/stores/app';
+  import { storeToRefs } from 'pinia';
+  import {
+    clearCache,
+    getRecommendedConcurrency,
+    getSensitiveRules,
+    saveConfig,
+  } from '@/utils/tauri-api';
+  import { applyTheme } from '@/utils/theme';
+  // 【C2 优化】导入错误处理工具
+  import { getFriendlyErrorMessage } from '@/utils/error-handler';
+
+  const emit = defineEmits<{
+    close: [];
+  }>();
+
+  const appStore = useAppStore();
+  const { config } = storeToRefs(appStore);
+
+  const newIgnoreDir = ref('');
+  const newSystemDir = ref('');
+  const sensitiveTypes = ref<Array<{ id: string; name: string }>>([]);
+
+  // 检测是否为 Windows 系统
+  const isWindows = computed(() => {
+    return navigator.userAgent.toLowerCase().includes('win');
+  });
+
+  onMounted(async () => {
+    try {
+      const rules = await getSensitiveRules();
+      // 后端返回的是 [id, name, enabled_by_default] 元组数组
+      sensitiveTypes.value = rules.map(([id, name]: [string, string, boolean]) => ({ id, name }));
+
+      // 如果配置中的并发数为 0，则使用系统推荐的值
+      if (config.value.scanConcurrency === 0) {
+        config.value.scanConcurrency = await getRecommendedConcurrency();
+      }
+    } catch (error) {
+      console.error('获取敏感规则失败:', error);
+    }
+  });
+
+  const toggleSensitiveType = (typeId: string, event: Event) => {
+    const checked = (event.target as HTMLInputElement).checked;
+
+    if (checked) {
+      if (!config.value.enabledSensitiveTypes.includes(typeId)) {
+        config.value.enabledSensitiveTypes.push(typeId);
+      }
+    } else {
+      config.value.enabledSensitiveTypes = config.value.enabledSensitiveTypes.filter(
+        (id) => id !== typeId
+      );
+    }
+  };
+
+  const addIgnoreDir = () => {
+    if (newIgnoreDir.value.trim()) {
+      config.value.ignoreDirNames.push(newIgnoreDir.value.trim());
+      newIgnoreDir.value = '';
+    }
+  };
+
+  const removeIgnoreDir = (index: number) => {
+    config.value.ignoreDirNames.splice(index, 1);
+  };
+
+  const addSystemDir = () => {
+    if (newSystemDir.value.trim()) {
+      config.value.systemDirs.push(newSystemDir.value.trim());
+      newSystemDir.value = '';
+    }
+  };
+
+  const removeSystemDir = (index: number) => {
+    config.value.systemDirs.splice(index, 1);
+  };
+
+  const handleSave = async () => {
+    try {
+      // 将Proxy对象转换为普通对象，以便通过IPC传递
+      const plainConfig = JSON.parse(JSON.stringify(config.value));
+      await saveConfig(plainConfig);
+      // 应用主题设置
+      applyTheme(config.value.theme as 'light' | 'dark' | 'system');
+      // 【C2 优化】静默成功，不显示提示
+      emit('close');
+    } catch (error) {
+      console.error('保存配置失败:', error);
+      alert(getFriendlyErrorMessage(error));
+    }
+  };
+
+  const handleClearCache = async () => {
+    if (!confirm('确定要清理应用数据吗？\n\n这将删除：\n- 超过30天的旧日志文件\n- 扫描结果缓存和临时文件\n\n注意：Tauri使用系统WebView，浏览器缓存由系统自动管理。')) {
+      return;
+    }
+
+    try {
+      const result = await clearCache({
+        cleanLogs: true,
+        cleanTemp: true,
+        logRetentionDays: 30,
+      });
+      // 后端返回的字段是 space_freed_bytes
+      const sizeMB = Math.round((result.space_freed_bytes || 0) / 1024 / 1024);
+      // 【C2 优化】友好的成功提示
+      alert(`应用数据清理完成！\n\n释放空间: ${sizeMB} MB`);
+    } catch (error) {
+      console.error('清理应用数据失败:', error);
+      alert(getFriendlyErrorMessage(error));
+    }
+  };
+</script>
+
 <template>
   <div class="modal-overlay" @click.self="$emit('close')">
     <div class="modal-container">
@@ -5,11 +123,11 @@
         <h3>设置</h3>
         <button class="close-btn" @click="$emit('close')">×</button>
       </div>
-      
+
       <div class="modal-body">
         <div class="settings-section">
           <h4>外观设置</h4>
-          
+
           <div class="setting-item">
             <label>主题模式</label>
             <select v-model="config.theme" class="theme-select">
@@ -19,80 +137,98 @@
             </select>
           </div>
         </div>
-        
+
         <div class="settings-section">
           <h4>扫描配置</h4>
-          
+
           <div class="setting-item">
             <label>最大文件大小 (MB)</label>
-            <input 
-              type="number" 
-              v-model.number="config.max_file_size_mb"
-              min="1"
-              max="500"
-            />
+            <input v-model.number="config.maxFileSizeMb" type="number" min="1" max="500" />
           </div>
-          
+
           <div class="setting-item">
             <label>PDF 最大大小 (MB)</label>
-            <input 
-              type="number" 
-              v-model.number="config.max_pdf_size_mb"
-              min="1"
-              max="1000"
-            />
+            <input v-model.number="config.maxPdfSizeMb" type="number" min="1" max="1000" />
           </div>
-          
+
           <div class="setting-item">
             <label>扫描并发数</label>
-            <input 
-              type="number" 
-              v-model.number="config.scan_concurrency"
-              min="1"
-              max="16"
-            />
+            <input v-model.number="config.scanConcurrency" type="number" min="1" max="16" />
           </div>
         </div>
-        
+
         <div class="settings-section">
-          <h4>文件操作</h4>
-          
-          <div class="setting-item">
-            <label>删除文件时移入回收站</label>
-            <input 
-              type="checkbox" 
-              v-model="config.delete_to_trash"
-            />
-            <span class="hint">（取消勾选则永久删除）</span>
+          <h4>敏感词规则</h4>
+
+          <div class="setting-item setting-item-checkbox">
+            <label class="checkbox-label">
+              <input v-model="config.enableBuiltinRules" type="checkbox" />
+              <span>启用内置敏感词扫描规则</span>
+            </label>
           </div>
+          <p class="setting-description">
+            启用后将检测身份证号、手机号、邮箱、银行卡号等敏感信息。<br />
+            取消勾选则仅使用自定义表达式进行关键字搜索。
+          </p>
         </div>
-        
-        <div class="settings-section">
+
+        <!-- 【条件渲染】敏感类型管理 -->
+        <div v-if="config.enableBuiltinRules !== false" class="settings-section">
           <h4>敏感类型管理</h4>
           <div class="sensitive-types">
             <label v-for="type in sensitiveTypes" :key="type.id" class="type-item">
-              <input 
+              <input
                 type="checkbox"
-                :checked="config.enabled_sensitive_types.includes(type.id)"
+                :checked="config.enabledSensitiveTypes.includes(type.id)"
                 @change="toggleSensitiveType(type.id, $event)"
               />
               {{ type.name }}
             </label>
           </div>
         </div>
-        
+
+        <div class="settings-section">
+          <h4>文件操作</h4>
+
+          <div class="setting-item setting-item-checkbox">
+            <label class="checkbox-label">
+              <input v-model="config.deleteToTrash" type="checkbox" />
+              <span>删除文件时移入回收站</span>
+            </label>
+          </div>
+          <p class="setting-description">取消勾选则永久删除</p>
+
+          <div v-if="isWindows" class="setting-item setting-item-checkbox">
+            <label class="checkbox-label">
+              <input v-model="config.ignoreOtherDrivesSystemDirs" type="checkbox" />
+              <span>忽略其他磁盘的系统目录</span>
+            </label>
+          </div>
+          <p v-if="isWindows" class="setting-description">
+            启用后将忽略 D-Z 盘的 Windows、Program Files 等系统目录
+          </p>
+
+          <div class="setting-item">
+            <button class="btn-clear-cache" @click="handleClearCache">
+              <svg class="btn-icon"><use href="#icon-delete" /></svg>
+              清理应用数据
+            </button>
+            <span class="hint">（清理旧日志文件和扫描缓存）</span>
+          </div>
+        </div>
+
         <div class="settings-section">
           <h4>忽略目录名（任意位置）</h4>
           <p class="section-hint">这些名称的目录在任何位置都会被忽略，如 node_modules、.git 等</p>
           <div class="ignore-dirs">
-            <div v-for="(dir, index) in config.ignore_dir_names" :key="index" class="dir-item">
+            <div v-for="(dir, index) in config.ignoreDirNames" :key="index" class="dir-item">
               <span>{{ dir }}</span>
               <button class="btn-remove" @click="removeIgnoreDir(index)">×</button>
             </div>
             <div class="add-dir">
-              <input 
-                type="text" 
+              <input
                 v-model="newIgnoreDir"
+                type="text"
                 placeholder="输入目录名"
                 @keyup.enter="addIgnoreDir"
               />
@@ -100,19 +236,19 @@
             </div>
           </div>
         </div>
-        
+
         <div class="settings-section">
           <h4>系统目录路径（特定位置）</h4>
           <p class="section-hint">只有匹配这些完整路径的目录才会被忽略，如 C:\Windows、/usr 等</p>
           <div class="ignore-dirs">
-            <div v-for="(dir, index) in config.system_dirs" :key="index" class="dir-item">
+            <div v-for="(dir, index) in config.systemDirs" :key="index" class="dir-item">
               <span>{{ dir }}</span>
               <button class="btn-remove" @click="removeSystemDir(index)">×</button>
             </div>
             <div class="add-dir">
-              <input 
-                type="text" 
+              <input
                 v-model="newSystemDir"
+                type="text"
                 placeholder="输入完整路径"
                 @keyup.enter="addSystemDir"
               />
@@ -121,7 +257,7 @@
           </div>
         </div>
       </div>
-      
+
       <div class="modal-footer">
         <button class="btn" @click="$emit('close')">取消</button>
         <button class="btn btn-primary" @click="handleSave">保存</button>
@@ -130,313 +266,281 @@
   </div>
 </template>
 
-<script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { useAppStore } from '../stores/app'
-import { storeToRefs } from 'pinia'
-import { saveConfig, getSensitiveRules, getRecommendedConcurrency } from '../utils/tauri-api' // 【新增】导入 getRecommendedConcurrency
-import { applyTheme } from '../utils/theme'
-
-const emit = defineEmits<{
-  close: []
-}>()
-
-const appStore = useAppStore()
-const { config } = storeToRefs(appStore)
-
-const newIgnoreDir = ref('')
-const newSystemDir = ref('')
-const sensitiveTypes = ref<Array<{id: string, name: string}>>([])
-
-onMounted(async () => {
-  try {
-    const rules = await getSensitiveRules()
-    sensitiveTypes.value = rules.map(([id, name]) => ({ id, name }))
-    
-    // 【新增】如果并发数为 0（首次运行），自动获取推荐值
-    if (config.value.scan_concurrency === 0) {
-      try {
-        const info = await getRecommendedConcurrency()
-        config.value.scan_concurrency = info.recommended
-        console.log(`自动设置并发数为: ${info.recommended} (CPU: ${info.cpu_count}核, 可用内存: ${info.free_memory_gb}GB)`)
-      } catch (error) {
-        console.error('获取推荐并发数失败:', error)
-        // 降级为默认值 4
-        config.value.scan_concurrency = 4
-      }
-    }
-  } catch (error) {
-    console.error('获取敏感规则失败:', error)
-  }
-})
-
-const toggleSensitiveType = (typeId: string, event: Event) => {
-  const checked = (event.target as HTMLInputElement).checked
-  
-  if (checked) {
-    if (!config.value.enabled_sensitive_types.includes(typeId)) {
-      config.value.enabled_sensitive_types.push(typeId)
-    }
-  } else {
-    config.value.enabled_sensitive_types = config.value.enabled_sensitive_types.filter(
-      id => id !== typeId
-    )
-  }
-}
-
-const addIgnoreDir = () => {
-  if (newIgnoreDir.value.trim()) {
-    config.value.ignore_dir_names.push(newIgnoreDir.value.trim())
-    newIgnoreDir.value = ''
-  }
-}
-
-const removeIgnoreDir = (index: number) => {
-  config.value.ignore_dir_names.splice(index, 1)
-}
-
-const addSystemDir = () => {
-  if (newSystemDir.value.trim()) {
-    config.value.system_dirs.push(newSystemDir.value.trim())
-    newSystemDir.value = ''
-  }
-}
-
-const removeSystemDir = (index: number) => {
-  config.value.system_dirs.splice(index, 1)
-}
-
-const handleSave = async () => {
-  try {
-    await saveConfig(config.value)
-    // 应用主题设置
-    applyTheme(config.value.theme as any)
-    alert('配置已保存')
-    emit('close')
-  } catch (error) {
-    console.error('保存配置失败:', error)
-    alert('保存配置失败')
-  }
-}
-</script>
-
 <style scoped>
-.modal-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-}
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
 
-.modal-container {
-  background-color: var(--modal-bg);
-  color: var(--text-color);
-  border-radius: 8px;
-  width: min(600px, 90vw);
-  max-height: 85vh;
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-}
+  .modal-container {
+    background-color: var(--modal-bg);
+    color: var(--text-color);
+    border-radius: 8px;
+    width: min(600px, 90vw);
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  }
 
-.modal-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 16px 20px;
-  border-bottom: 1px solid var(--border-color);
-}
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-color);
+  }
 
-.modal-header h3 {
-  font-size: 16px;
-  font-weight: 600;
-}
+  .modal-header h3 {
+    font-size: 16px;
+    font-weight: 600;
+  }
 
-.close-btn {
-  background: none;
-  border: none;
-  font-size: 28px;
-  cursor: pointer;
-  color: #999;
-  line-height: 1;
-}
+  .close-btn {
+    background: none;
+    border: none;
+    font-size: 28px;
+    cursor: pointer;
+    color: #999;
+    line-height: 1;
+  }
 
-.close-btn:hover {
-  color: #333;
-}
+  .close-btn:hover {
+    color: #333;
+  }
 
-.modal-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 20px;
-}
+  .modal-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+  }
 
-.settings-section {
-  margin-bottom: 24px;
-}
+  .settings-section {
+    margin-bottom: 24px;
+  }
 
-.settings-section h4 {
-  font-size: 14px;
-  font-weight: 600;
-  margin-bottom: 12px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border-color);
-}
+  .settings-section h4 {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-color);
+  }
 
-.section-hint {
-  font-size: 12px;
-  color: #999;
-  margin-top: -8px;
-  margin-bottom: 12px;
-}
+  .section-hint {
+    font-size: 12px;
+    color: #999;
+    margin-top: -8px;
+    margin-bottom: 12px;
+  }
 
-.setting-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
+  .setting-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+  }
 
-.setting-item label {
-  font-size: 13px;
-}
+  /* 【新增】复选框类型的设置项 */
+  .setting-item-checkbox {
+    margin-bottom: 4px; /* 减少间距，因为下面有描述文字 */
+  }
 
-.setting-item input[type="number"] {
-  width: 100px;
-  padding: 5px 8px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background-color: var(--input-bg);
-  color: var(--text-color);
-}
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    cursor: pointer;
+  }
 
-.theme-select {
-  padding: 5px 8px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background-color: var(--input-bg);
-  color: var(--text-color);
-  cursor: pointer;
-}
+  .checkbox-label input[type='checkbox'] {
+    cursor: pointer;
+    margin: 0; /* 移除默认 margin */
+  }
 
-.setting-item input[type="checkbox"] {
-  cursor: pointer;
-}
+  .checkbox-label span {
+    user-select: none;
+  }
 
-.hint {
-  font-size: 12px;
-  color: #999;
-  margin-left: 8px;
-}
+  /* 【新增】设置项描述文字 */
+  .setting-description {
+    font-size: 12px;
+    color: #999;
+    margin: 0 0 12px 0; /* 上边距为0，下边距保持与其他项一致 */
+    padding-left: 0; /* 如果需要缩进可以设置为 24px */
+    line-height: 1.5;
+  }
 
-.sensitive-types {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-}
+  .setting-item label {
+    font-size: 13px;
+  }
 
-.type-item {
-  font-size: 13px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
+  .setting-item input[type='number'] {
+    width: 100px;
+    padding: 5px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background-color: var(--input-bg);
+    color: var(--text-color);
+  }
 
-.ignore-dirs {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+  .theme-select {
+    padding: 5px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background-color: var(--input-bg);
+    color: var(--text-color);
+    cursor: pointer;
+  }
 
-.dir-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 6px 10px;
-  background-color: var(--bg-hover);
-  border-radius: 4px;
-  font-size: 13px;
-  color: var(--text-color);
-}
+  .setting-item input[type='checkbox'] {
+    cursor: pointer;
+    margin: 0;
+  }
 
-.btn-remove {
-  background: none;
-  border: none;
-  font-size: 18px;
-  cursor: pointer;
-  color: #999;
-}
+  .hint {
+    font-size: 12px;
+    color: #999;
+    margin-left: 8px;
+  }
 
-.btn-remove:hover {
-  color: var(--error-color);
-}
+  .sensitive-types {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
 
-.add-dir {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
-}
+  .type-item {
+    font-size: 13px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
 
-.add-dir input {
-  flex: 1;
-  padding: 5px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  font-size: 13px;
-  background-color: var(--input-bg);
-  color: var(--text-color);
-}
+  .ignore-dirs {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
 
-.btn-small {
-  padding: 5px 12px;
-  border: 1px solid var(--border-color);
-  background-color: var(--bg-color);
-  color: var(--text-color);
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 13px;
-}
+  .dir-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    background-color: var(--bg-hover);
+    border-radius: 4px;
+    font-size: 13px;
+    color: var(--text-color);
+  }
 
-.btn-small:hover {
-  background-color: var(--bg-hover);
-}
+  .btn-remove {
+    background: none;
+    border: none;
+    font-size: 18px;
+    cursor: pointer;
+    color: #999;
+  }
 
-.modal-footer {
-  display: flex;
-  gap: 10px;
-  justify-content: flex-end;
-  padding: 12px 20px;
-  border-top: 1px solid var(--border-color);
-}
+  .btn-remove:hover {
+    color: var(--error-color);
+  }
 
-.btn {
-  padding: 6px 16px;
-  border: 1px solid var(--border-color);
-  background-color: var(--bg-color);
-  color: var(--text-color);
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 14px;
-}
+  .add-dir {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
 
-.btn:hover {
-  background-color: var(--bg-hover);
-}
+  .add-dir input {
+    flex: 1;
+    padding: 5px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    font-size: 13px;
+    background-color: var(--input-bg);
+    color: var(--text-color);
+  }
 
-.btn-primary {
-  background-color: var(--primary-color);
-  color: white;
-  border-color: var(--primary-color);
-}
+  .btn-small {
+    padding: 5px 12px;
+    border: 1px solid var(--border-color);
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  }
 
-.btn-primary:hover {
-  background-color: #40a9ff;
-}
+  .btn-small:hover {
+    background-color: var(--bg-hover);
+  }
+
+  .modal-footer {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    padding: 12px 20px;
+    border-top: 1px solid var(--border-color);
+  }
+
+  .btn {
+    padding: 6px 16px;
+    border: 1px solid var(--border-color);
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+
+  .btn:hover {
+    background-color: var(--bg-hover);
+  }
+
+  .btn-primary {
+    background-color: var(--primary-color);
+    color: white;
+    border-color: var(--primary-color);
+  }
+
+  .btn-primary:hover {
+    background-color: #40a9ff;
+  }
+
+  .btn-clear-cache {
+    padding: 6px 12px;
+    border: 1px solid var(--border-color);
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  /* 【新增】按钮内 SVG 图标 */
+  .btn-icon {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+  }
+
+  .btn-clear-cache:hover {
+    background-color: var(--bg-hover);
+    border-color: var(--primary-color);
+  }
 </style>

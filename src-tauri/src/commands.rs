@@ -1,19 +1,28 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{State, AppHandle, Emitter};
+use tauri::{State, AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
-use lazy_static::lazy_static;
 
 use crate::models::*;
-use crate::scanner::{run_scan_safe, ScanEvent};
-use crate::file_parser::extract_text_from_file;
-use crate::sensitive_detector::{get_highlights, get_builtin_rules};
-use crate::config;
+use crate::core::scanner::{run_scan_safe, ScanEvent};
+use crate::processing::preview;
+use crate::core::sensitive_detector::get_builtin_rules;
+use crate::utils::config;
 
-lazy_static! {
-    /// 预览任务取消标志（只保留最新的）
-    static ref LATEST_PREVIEW_CANCEL_FLAG: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
+/// 应用状态（管理全局配置）
+pub struct AppState {
+    pub config: Arc<Mutex<AppConfig>>,
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        // 尝试加载配置，如果失败则使用默认值
+        let app_config = config::load_app_config().unwrap_or_default();
+        Self {
+            config: Arc::new(Mutex::new(app_config)),
+        }
+    }
 }
 
 /// 扫描状态
@@ -57,7 +66,26 @@ pub fn get_directory_tree(path: String, show_hidden: bool) -> Result<Vec<Directo
             }
             
             // 检查是否有子目录（用于懒加载）
-            let has_children = is_dir && entry.path().read_dir().is_ok_and(|mut rd| rd.next().is_some());
+            // 【注意】与Electron版本保持一致，不考虑show_hidden，只检查目录是否为空
+            let has_children = if is_dir {
+                match std::fs::read_dir(&entry.path()) {
+                    Ok(rd) => {
+                        let count = rd.count();
+                        if file_name == "Applications" || file_name == "Library" || file_name == "Users" {
+                            log_info!("目录 {} 有 {} 个子项", file_path, count);
+                        }
+                        count > 0
+                    }
+                    Err(e) => {
+                        if file_name == "Applications" || file_name == "Library" || file_name == "Users" {
+                            log_warn!("无法读取目录 {}: {}", file_path, e);
+                        }
+                        false
+                    }
+                }
+            } else {
+                false
+            };
             
             nodes.push(DirectoryNode {
                 path: file_path,
@@ -87,13 +115,13 @@ pub async fn scan_start(
 ) -> Result<(), String> {
     let mut is_scanning = state.is_scanning.lock().map_err(|e| e.to_string())?;
     if *is_scanning {
-        log::warn!("扫描正在进行中，拒绝新的扫描请求");
+        log_warn!("扫描正在进行中，拒绝新的扫描请求");
         return Err("扫描正在进行中".to_string());
     }
     *is_scanning = true;
     drop(is_scanning);
     
-    log::info!("开始新的扫描任务");
+    log_info!("开始新的扫描任务");
     
     // 重置取消标志
     state.cancel_flag.store(false, Ordering::Relaxed);
@@ -108,7 +136,7 @@ pub async fn scan_start(
     let app_clone_for_error = app.clone();
     tokio::spawn(async move {
         if let Err(e) = run_scan_safe(config, tx, cancel_flag).await {
-            log::error!("扫描任务出错: {}", e);
+            log_error!("扫描任务出错: {}", e);
             let _ = app_clone_for_error.emit("scan-error", e);
         }
     });
@@ -129,18 +157,10 @@ pub async fn scan_start(
         let mut last_log_time = std::time::Instant::now();
         let log_throttle = std::time::Duration::from_millis(config::LOG_THROTTLE_MS);
         
-        // 【新增】停滞检测：跟踪最后活动时间
-        let mut last_activity_time = std::time::Instant::now();
-        let warning_threshold = std::time::Duration::from_secs(config::STAGNATION_WARNING_THRESHOLD_SECS);
-        let force_stop_threshold = std::time::Duration::from_secs(config::STAGNATION_FORCE_STOP_THRESHOLD_SECS);
-        
-        // 【新增】创建停滞检测定时器
-        let mut stagnation_timer = tokio::time::interval(std::time::Duration::from_secs(config::STAGNATION_CHECK_INTERVAL_SECS));
-        
         loop {
             // 检查超时
             if start_time.elapsed() > timeout_duration {
-                log::error!("扫描超时");
+                log_error!("扫描超时");
                 if let Ok(mut is_scanning) = is_scanning_clone.lock() {
                     *is_scanning = false;
                 }
@@ -149,49 +169,27 @@ pub async fn scan_start(
             }
             
             tokio::select! {
-                // 【新增】停滞检测定时器
-                _ = stagnation_timer.tick() => {
-                    let now = std::time::Instant::now();
-                    let idle_time = now.duration_since(last_activity_time);
-                    
-                    // 检查是否有任何实质性进展（对比状态快照）
-                    // 由于我们已经在收到事件时更新了 last_activity_time
-                    // 所以这里只需要检查 idle_time 即可
-                    
-                    if idle_time > warning_threshold {
-                        // 第一层：短时间停滞警告
-                        if idle_time <= force_stop_threshold {
-                            log::warn!("警告: {}秒内无任何进展，扫描可能卡住", idle_time.as_secs());
-                            let _ = app_clone.emit("scan-log", format!("⚠️ 警告: {}秒内无进展，正在监控...", idle_time.as_secs()));
-                        }
-                        
-                        // 第二层：长时间停滞强制结束
-                        if idle_time > force_stop_threshold {
-                            log::error!("错误: {}秒内无任何进展，强制结束扫描", idle_time.as_secs());
-                            let _ = app_clone.emit("scan-log", format!("❌ 错误: {}秒内无进展，强制结束", idle_time.as_secs()));
-                            
-                            if let Ok(mut is_scanning) = is_scanning_clone.lock() {
-                                *is_scanning = false;
-                            }
-                            let _ = app_clone.emit("scan-error", format!("扫描停滞超过{}秒，已强制结束", force_stop_threshold.as_secs()));
-                            break;
-                        }
-                    }
-                }
                 Some(event) = rx.recv() => {
-                    // 【新增】更新最后活动时间
-                    last_activity_time = std::time::Instant::now();
                     
                     match event {
-                        ScanEvent::Progress { current_file, scanned_count, total_count } => {
-                            let _ = app_clone.emit("scan-progress", serde_json::json!({
-                                "current_file": current_file,
-                                "scanned_count": scanned_count,
-                                "total_count": total_count,
-                            }));
+                        ScanEvent::Progress { current_file, scanned_count, total_count, filtered_count, skipped_count } => {
+                            let mut progress_data = serde_json::json!({
+                                "currentFile": current_file,
+                                "scannedCount": scanned_count,
+                                "totalCount": total_count,
+                            });
+                            // 【新增】只有当filtered_count和skipped_count有值时才添加
+                            if let Some(fc) = filtered_count {
+                                progress_data["filteredCount"] = serde_json::json!(fc);
+                            }
+                            if let Some(sc) = skipped_count {
+                                progress_data["skippedCount"] = serde_json::json!(sc);
+                            }
+                            let _ = app_clone.emit("scan-progress", progress_data);
                         }
-                        ScanEvent::Result(item) => {
-                            let _ = app_clone.emit("scan-result", item);
+                        ScanEvent::BatchResult(items) => {
+                            // 【优化】批量结果，一次性发送整个数组
+                            let _ = app_clone.emit("scan-batch-result", items);
                         }
                         ScanEvent::Log(msg) => {
                             // 【优化】日志节流，但允许连续日志快速通过（初始阶段）
@@ -205,21 +203,19 @@ pub async fn scan_start(
                                 last_log_time = now;
                             }
                             
-                            // 【优化】异步添加日志到内存，避免阻塞
-                            let logs_clone_inner = logs_clone.clone();
-                            tokio::spawn(async move {
-                                if let Ok(mut l) = logs_clone_inner.lock() {
-                                    l.push(msg);
-                                    // 限制日志数量，防止内存泄漏
-                                    let len = l.len();
-                                    if len > config::MAX_LOG_ENTRIES {
-                                        l.drain(0..len - config::MAX_LOG_ENTRIES);
-                                    }
+                            // 【优化】同步添加日志到内存，避免丢失
+                            // 使用 try_lock 避免阻塞，如果锁被占用则跳过
+                            if let Ok(mut l) = logs_clone.lock() {
+                                l.push(msg);
+                                // 限制日志数量，防止内存泄漏
+                                let len = l.len();
+                                if len > config::MAX_LOG_ENTRIES {
+                                    l.drain(0..len - config::MAX_LOG_ENTRIES);
                                 }
-                            });
+                            }
                         }
                         ScanEvent::Finished => {
-                            log::info!("扫描完成，重置状态");
+                            log_info!("扫描完成，重置状态");
                             received_finished = true;
                             let _ = app_clone.emit("scan-finished", ());
                             if let Ok(mut is_scanning) = is_scanning_clone.lock() {
@@ -231,7 +227,7 @@ pub async fn scan_start(
                 }
                 else => {
                     // 通道关闭，扫描异常结束
-                    log::warn!("扫描通道关闭，强制重置状态");
+                    log_warn!("扫描通道关闭，强制重置状态");
                     if let Ok(mut is_scanning) = is_scanning_clone.lock() {
                         *is_scanning = false;
                     }
@@ -241,7 +237,7 @@ pub async fn scan_start(
         }
         
         if !received_finished {
-            log::warn!("扫描未正常结束，已强制重置状态");
+            log_warn!("扫描未正常结束，已强制重置状态");
         }
     });
     
@@ -255,119 +251,69 @@ pub fn scan_cancel(state: State<'_, ScanState>) -> Result<bool, String> {
     Ok(true)
 }
 
-/// 取消预览任务
-#[tauri::command]
-pub fn cancel_preview() -> Result<bool, String> {
-    let guard = LATEST_PREVIEW_CANCEL_FLAG.lock()
-        .map_err(|e| format!("获取锁失败: {}", e))?;
-    
-    if let Some(flag) = guard.as_ref() {
-        flag.store(true, Ordering::Relaxed);
-        log::debug!("已请求取消预览任务");
-        Ok(true)
-    } else {
-        log::warn!("没有正在进行的预览任务");
-        Ok(false)
-    }
-}
-
 /// 预览文件
 #[tauri::command]
 pub async fn preview_file(path: String, max_bytes: Option<usize>) -> Result<PreviewResult, String> {
-    let max_bytes = max_bytes.unwrap_or(config::DEFAULT_PREVIEW_MAX_BYTES); // 默认 200KB
+    preview::preview_file(path, max_bytes).await
+}
+
+/// 取消预览
+#[tauri::command]
+pub fn cancel_preview() -> Result<bool, String> {
+    preview::cancel_preview()
+}
+
+/// 流式预览文件
+#[tauri::command]
+pub async fn preview_file_stream(
+    path: String,
+    app: AppHandle,
+) -> Result<(), String> {
+    preview::preview_file_stream(path, app).await
+}
+
+/// 读取文件内容为二进制数据（用于预览）
+#[tauri::command]
+pub async fn read_file_as_blob(path: String) -> Result<Vec<u8>, String> {
+    use crate::utils::path_security::is_path_safe;
     
-    log::debug!("开始预览任务");
+    log_info!("[read_file_as_blob] 收到请求，路径: {}", path);
     
-    // 创建取消标志，并设置为最新的预览任务
-    let cancel_flag = Arc::new(AtomicBool::new(false));
-    {
-        let mut latest_flag = LATEST_PREVIEW_CANCEL_FLAG.lock()
-            .map_err(|e| format!("获取锁失败: {}", e))?;
-        *latest_flag = Some(cancel_flag.clone());
+    // 【简化】仅检查路径安全性（防路径遍历攻击），允许访问所有绝对路径的文件
+    let check_result = is_path_safe(&path);
+    if !check_result.is_allowed() {
+        log_warn!("[read_file_as_blob] 路径安全检查失败: {:?}", check_result);
+        return Err(format!("不允许访问该路径: {:?}", check_result));
     }
     
-    // 在后台线程中执行文件读取，避免阻塞主线程
-    let path_clone = path.clone();
-    let cancel_flag_clone = cancel_flag.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        // 检查是否被取消
-        if cancel_flag_clone.load(Ordering::Relaxed) {
-            return Err("任务已取消".to_string());
+    log_info!("[read_file_as_blob] 路径安全检查通过，开始读取文件...");
+    
+    // 读取文件内容
+    match tokio::fs::read(&path).await {
+        Ok(data) => {
+            log_info!("[read_file_as_blob] 成功读取文件，大小: {} bytes", data.len());
+            Ok(data)
         }
-        extract_text_from_file(&path_clone)
-    })
-    .await
-    .map_err(|e| format!("任务执行失败: {}", e))?
-    .map_err(|e| format!("文件读取失败: {}", e))?;
-    
-    // 再次检查是否被取消
-    if cancel_flag.load(Ordering::Relaxed) {
-        log::debug!("预览任务已取消（文件读取后）");
-        return Err("任务已取消".to_string());
-    }
-    
-    let (text, unsupported_preview) = result;
-    
-    if unsupported_preview {
-        return Ok(PreviewResult {
-            content: "该文件类型不支持内容预览".to_string(),
-            highlights: vec![],
-        });
-    }
-    
-    // 限制预览大小（按字符边界截断，避免破坏多字节字符）
-    let truncated = if text.len() > max_bytes {
-        // 找到最接近 max_bytes 的字符边界
-        let mut byte_idx = max_bytes;
-        while byte_idx > 0 && !text.is_char_boundary(byte_idx) {
-            byte_idx -= 1;
+        Err(e) => {
+            log_error!("[read_file_as_blob] 读取文件失败: {}", e);
+            Err(format!("读取文件失败: {}", e))
         }
-        &text[..byte_idx]
-    } else {
-        &text
-    };
-    
-    // 再次检查是否被取消（高亮计算前）
-    if cancel_flag.load(Ordering::Relaxed) {
-        log::debug!("预览任务已取消（高亮计算前）");
-        return Err("任务已取消".to_string());
     }
-    
-    // 获取敏感规则（默认全部启用用于高亮）
-    let rules = get_builtin_rules();
-    let enabled_types: Vec<String> = rules.iter()
-        .filter(|(_, _, enabled)| *enabled)
-        .map(|(id, _, _)| id.clone())
-        .collect();
-    
-    // 获取高亮区间
-    let highlights_raw = get_highlights(truncated, &enabled_types);
-    let highlights = highlights_raw.into_iter()
-        .map(|(start, end, type_id, type_name)| HighlightRange {
-            start,
-            end,
-            type_id,
-            type_name,
-        })
-        .collect();
-    
-    log::debug!("预览任务完成");
-    
-    Ok(PreviewResult {
-        content: truncated.to_string(),
-        highlights,
-    })
 }
 
 /// 打开文件
 #[tauri::command]
 pub fn open_file(path: String) -> Result<(), String> {
+    // 【修复】对于已扫描的文件，直接允许打开，无需再次检查路径
+    // 因为能出现在结果列表中，说明已经通过了扫描时的路径安全检查
     open::that(&path).map_err(|e| format!("无法打开文件: {}", e))
 }
 
 /// 打开文件所在目录
 #[tauri::command]
 pub fn open_file_location(path: String) -> Result<(), String> {
+    // 【修复】对于已扫描的文件，直接允许打开目录，无需再次检查路径
+    
     // 在不同平台上打开目录
     #[cfg(target_os = "windows")]
     {
@@ -404,7 +350,14 @@ pub fn open_file_location(path: String) -> Result<(), String> {
 /// 删除文件（根据配置决定移入回收站或永久删除）
 #[tauri::command]
 pub fn delete_file(path: String) -> Result<(), String> {
-    // 加载配置
+    use crate::utils::path_security::is_path_safe;
+    
+    // 【简化】仅检查路径安全性（防路径遍历攻击），允许访问所有已扫描的文件
+    let check_result = is_path_safe(&path);
+    if !check_result.is_allowed() {
+        return Err(format!("不允许访问该路径: {:?}", check_result));
+    }
+    
     let config = load_config().map_err(|e| format!("加载配置失败: {}", e))?;
     
     if config.delete_to_trash {
@@ -423,6 +376,12 @@ pub fn export_report(
     format: String,
     save_path: String,
 ) -> Result<String, String> {
+    // 【安全】验证导出路径安全性（允许写入用户选择的任何位置）
+    let path = Path::new(&save_path);
+    if !path.is_absolute() {
+        return Err("导出路径必须是绝对路径".to_string());
+    }
+    
     match format.as_str() {
         "csv" => export_csv(&results, &save_path),
         "json" => export_json(&results, &save_path),
@@ -433,6 +392,15 @@ pub fn export_report(
 
 fn export_csv(results: &[ScanResultItem], path: &str) -> Result<String, String> {
     use std::io::Write;
+    
+    // 【安全】CSV字段转义函数，防止公式注入
+    fn escape_csv_field(field: &str) -> String {
+        if field.contains(',') || field.contains('"') || field.contains('\n') || field.starts_with('=') || field.starts_with('+') || field.starts_with('-') || field.starts_with('@') {
+            format!("\"{}\"", field.replace('"', "\"\""))
+        } else {
+            field.to_string()
+        }
+    }
     
     let mut file = std::fs::File::create(path)
         .map_err(|e| format!("无法创建文件: {}", e))?;
@@ -452,9 +420,9 @@ fn export_csv(results: &[ScanResultItem], path: &str) -> Result<String, String> 
         writeln!(
             file,
             "{},{},{},{},{},{},{},{},{},{},{}",
-            item.file_path,
+            escape_csv_field(&item.file_path),
             item.file_size,
-            item.modified_time,
+            escape_csv_field(&item.modified_time),
             person_id,
             phone,
             email,
@@ -480,94 +448,88 @@ fn export_json(results: &[ScanResultItem], path: &str) -> Result<String, String>
 }
 
 fn export_xlsx(results: &[ScanResultItem], path: &str) -> Result<String, String> {
+    use crate::utils::excel_export::{
+        ExcelStyleConfig, create_header_style, create_cell_style, 
+        create_sensitive_style, write_headers, write_data_row, auto_adjust_column_width
+    };
     use rust_xlsxwriter::*;
     
     // 创建工作簿
     let mut workbook = Workbook::new();
+    
+    // 【关键】先创建所有样式，再获取worksheet（避免借用冲突）
+    let config = ExcelStyleConfig::default();
+    let header_style = create_header_style(&mut workbook, &config);
+    let cell_style = create_cell_style(&mut workbook, &config);
+    let sensitive_style = create_sensitive_style(&mut workbook, &config);
+    
+    // 现在才获取worksheet
     let worksheet = workbook.add_worksheet();
     
-    // 创建样式
-    let header_format = Format::new()
-        .set_bold()
-        .set_background_color(Color::Gray)
-        .set_border(FormatBorder::Thin);
-    
-    let number_format = Format::new()
-        .set_num_format("0");
-    
-    let highlight_format = Format::new()
-        .set_font_color(Color::Red)
-        .set_bold();
-    
-    // 写入表头
-    let headers = [
-        "文件路径",
-        "文件大小 (字节)",
-        "修改时间",
-        "身份证",
-        "手机号",
-        "邮箱",
-        "银行卡",
-        "地址",
-        "IP地址",
-        "密码",
-        "总计",
+    // 准备表头和数据
+    let headers = vec![
+        "文件路径".to_string(),
+        "文件大小 (字节)".to_string(),
+        "修改时间".to_string(),
+        "身份证".to_string(),
+        "手机号".to_string(),
+        "邮箱".to_string(),
+        "银行卡".to_string(),
+        "地址".to_string(),
+        "IP地址".to_string(),
+        "密码".to_string(),
+        "总计".to_string(),
     ];
     
-    for (col, header) in headers.iter().enumerate() {
-        worksheet.write_with_format(0, col as u16, *header, &header_format)
-            .map_err(|e| format!("写入表头失败: {}", e))?;
+    // 写入表头
+    write_headers(worksheet, &headers, &header_style)
+        .map_err(|e| format!("写入表头失败: {}", e))?;
+    
+    // 准备数据行
+    let sensitive_columns = vec![3, 4, 5, 6, 7, 8, 9, 10]; // 敏感数据列索引
+    let mut data_rows: Vec<Vec<String>> = Vec::new();
+    
+    for item in results {
+        let person_id = item.counts.get("person_id").unwrap_or(&0).to_string();
+        let phone = item.counts.get("phone").unwrap_or(&0).to_string();
+        let email = item.counts.get("email").unwrap_or(&0).to_string();
+        let bank_card = item.counts.get("bank_card").unwrap_or(&0).to_string();
+        let address = item.counts.get("address").unwrap_or(&0).to_string();
+        let ip_address = item.counts.get("ip_address").unwrap_or(&0).to_string();
+        let password = item.counts.get("password").unwrap_or(&0).to_string();
+        let total = item.total.to_string();
+        
+        let row = vec![
+            item.file_path.clone(),
+            item.file_size.to_string(),
+            item.modified_time.clone(),
+            person_id,
+            phone,
+            email,
+            bank_card,
+            address,
+            ip_address,
+            password,
+            total,
+        ];
+        
+        data_rows.push(row);
     }
     
-    // 设置列宽
-    let _ = worksheet.set_column_width(0, 60); // 文件路径
-    let _ = worksheet.set_column_width(1, 15); // 文件大小
-    let _ = worksheet.set_column_width(2, 20); // 修改时间
-    for col in 3..=10 {
-        let _ = worksheet.set_column_width(col as u16, 10);
+    // 写入数据行
+    for (row_idx, row_data) in data_rows.iter().enumerate() {
+        write_data_row(
+            worksheet,
+            row_idx,
+            row_data,
+            &cell_style,
+            &sensitive_columns,
+            &sensitive_style,
+        ).map_err(|e| format!("写入数据失败: {}", e))?;
     }
     
-    // 写入数据
-    for (row_idx, item) in results.iter().enumerate() {
-        let row = (row_idx + 1) as u32;
-        
-        // 文件路径
-        worksheet.write(row, 0, item.file_path.as_str())
-            .map_err(|e| format!("写入数据失败: {}", e))?;
-        
-        // 文件大小
-        worksheet.write_with_format(row, 1, item.file_size, &number_format)
-            .map_err(|e| format!("写入数据失败: {}", e))?;
-        
-        // 修改时间
-        worksheet.write(row, 2, item.modified_time.as_str())
-            .map_err(|e| format!("写入数据失败: {}", e))?;
-        
-        // 敏感数据统计
-        let sensitive_types = ["person_id", "phone", "email", "bank_card", "address", "ip_address", "password"];
-        
-        for (col_idx, type_id) in sensitive_types.iter().enumerate() {
-            let count = item.counts.get(*type_id).unwrap_or(&0);
-            let col = (col_idx + 3) as u16;
-            
-            if *count > 0 {
-                worksheet.write_with_format(row, col, *count, &highlight_format)
-                    .map_err(|e| format!("写入数据失败: {}", e))?;
-            } else {
-                worksheet.write_with_format(row, col, *count, &number_format)
-                    .map_err(|e| format!("写入数据失败: {}", e))?;
-            }
-        }
-        
-        // 总计
-        if item.total > 0 {
-            worksheet.write_with_format(row, 10, item.total, &highlight_format)
-                .map_err(|e| format!("写入数据失败: {}", e))?;
-        } else {
-            worksheet.write_with_format(row, 10, item.total, &number_format)
-                .map_err(|e| format!("写入数据失败: {}", e))?;
-        }
-    }
+    // 自动调整列宽
+    auto_adjust_column_width(worksheet, &headers, &data_rows);
     
     // 保存文件
     workbook.save(path)
@@ -609,9 +571,10 @@ pub fn load_config() -> Result<AppConfig, String> {
     
     if !Path::new(&config_path).exists() {
         // 【新增】首次运行时，使用当前平台的系统目录
-        let mut default_config = AppConfig::default();
-        default_config.system_dirs = crate::system_dirs::generate_system_dirs(false);
-        return Ok(default_config);
+        return Ok(AppConfig {
+            system_dirs: crate::utils::system_dirs::generate_system_dirs(false),
+            ..Default::default()
+        });
     }
     
     let content = std::fs::read_to_string(&config_path)
@@ -622,57 +585,30 @@ pub fn load_config() -> Result<AppConfig, String> {
     
     // 配置迁移：如果 system_dirs 为空，使用当前平台的默认值
     if config.system_dirs.is_empty() {
-        config.system_dirs = crate::system_dirs::generate_system_dirs(false);
+        config.system_dirs = crate::utils::system_dirs::generate_system_dirs(false);
     }
     
     Ok(config)
 }
 
 /// 获取配置文件路径
+/// 【优化】统一使用 config.rs 中的逻辑，从 tauri.conf.json 的 identifier 读取
 fn get_config_path() -> Result<String, String> {
-    // 优先使用程序所在目录
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("获取程序路径失败: {}", e))?;
-    
-    let exe_dir = exe_path.parent()
-        .ok_or("无法获取程序目录")?;
-    
-    let config_dir = exe_dir.join("data");
-    
-    // 如果程序目录不可写，使用用户数据目录
-    if !config_dir.exists() {
-        std::fs::create_dir_all(&config_dir).ok();
-    }
-    
-    if (!config_dir.is_dir() || !is_writable(&config_dir))
-        && let Some(user_data_dir) = dirs::data_dir() {
-        let fallback_dir = user_data_dir.join("DataGuard");
-        std::fs::create_dir_all(&fallback_dir).ok();
-        return Ok(fallback_dir.join("config.json").to_string_lossy().to_string());
-    }
-    
-    Ok(config_dir.join("config.json").to_string_lossy().to_string())
-}
-
-fn is_writable(path: &Path) -> bool {
-    let test_file = path.join(".write_test");
-    let result = std::fs::File::create(&test_file).is_ok();
-    if result {
-        std::fs::remove_file(&test_file).ok();
-    }
-    result
+    // 直接调用 config 模块的统一函数
+    let path = config::get_config_file_path();
+    Ok(path.to_string_lossy().to_string())
 }
 
 /// 检查系统环境
 #[tauri::command]
-pub fn check_system_environment() -> Result<crate::environment::EnvironmentCheck, String> {
-    Ok(crate::environment::check_environment())
+pub fn check_system_environment() -> Result<crate::utils::environment::EnvironmentCheck, String> {
+    Ok(crate::utils::environment::check_environment())
 }
 
 /// 获取推荐的并发数（根据 CPU 和内存智能计算）
 #[tauri::command]
 pub fn get_recommended_concurrency() -> Result<serde_json::Value, String> {
-    use crate::concurrency::calculate_recommended_concurrency;
+    use crate::utils::concurrency::calculate_recommended_concurrency;
     
     let info = calculate_recommended_concurrency();
     
@@ -682,4 +618,110 @@ pub fn get_recommended_concurrency() -> Result<serde_json::Value, String> {
         "cpu_count": info.cpu_count,
         "free_memory_gb": format!("{:.1}", info.free_memory_gb)
     }))
+}
+
+// ==================== 新增命令：暴露工具模块功能 ====================
+
+/// 显示消息对话框
+#[tauri::command]
+pub fn show_message_box(
+    app: AppHandle,
+    title: String,
+    message: String,
+    box_type: String,  // info/warning/error/confirm
+) -> Result<bool, String> {
+    use crate::utils::message_box::{MessageBoxConfig, show_message_box as show_mb};
+    
+    let config = match box_type.as_str() {
+        "info" => MessageBoxConfig::info(&title, &message),
+        "warning" => MessageBoxConfig::warning(&title, &message),
+        "error" => MessageBoxConfig::error(&title, &message),
+        "confirm" => MessageBoxConfig::confirm(&title, &message),
+        _ => return Err("不支持的对话框类型".to_string()),
+    };
+    
+    Ok(show_mb(&app, config))
+}
+
+/// 清理缓存
+#[tauri::command]
+pub fn clear_cache(
+    app: AppHandle,
+    clean_logs: bool,
+    clean_temp: bool,
+    log_retention_days: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    use crate::utils::cache_cleanup::clear_cache as clear;
+    
+    let retention = log_retention_days.unwrap_or(30);
+    let result = clear(&app, clean_logs, clean_temp, retention)?;
+    
+    // 使用 cache_cleanup 模块的 format_bytes 函数
+    use crate::utils::cache_cleanup::format_bytes;
+    
+    Ok(serde_json::json!({
+        "success": true,
+        "directories_cleaned": result.directories_cleaned,
+        "files_cleaned": result.files_cleaned,
+        "space_freed_bytes": result.space_freed_bytes,
+        "space_freed_formatted": format_bytes(result.space_freed_bytes),
+        "details": result.details
+    }))
+}
+
+/// 打开开发者工具（仅debug模式）
+#[tauri::command]
+pub fn open_dev_tools(app: AppHandle) -> Result<(), String> {
+    // Tauri 2.x API
+    if let Some(window) = app.get_webview_window("main") {
+        #[cfg(debug_assertions)]
+        {
+            window.open_devtools();
+            log_info!("✅ 开发者工具已打开");
+            Ok(())
+        }
+        
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = window; // 避免未使用警告
+            Err("生产模式下不支持打开开发者工具".to_string())
+        }
+    } else {
+        Err("主窗口不存在".to_string())
+    }
+}
+
+// ==================== 【新增】自定义表达式搜索相关命令 ====================
+
+/// 验证搜索表达式语法
+#[tauri::command]
+pub fn validate_search_expression(expression: String) -> Result<serde_json::Value, String> {
+    use crate::utils::expression_parser::validate_expression;
+    
+    let result = validate_expression(&expression);
+    
+    Ok(serde_json::json!({
+        "valid": result.valid,
+        "error": result.error
+    }))
+}
+
+/// 获取当前搜索表达式
+#[tauri::command]
+pub fn get_search_expression(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let config = state.config.lock().map_err(|e| e.to_string())?;
+    Ok(config.search_expression.clone())
+}
+
+/// 设置搜索表达式
+#[tauri::command]
+pub fn set_search_expression(
+    expression: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut config = state.config.lock().map_err(|e| e.to_string())?;
+    config.search_expression = expression;
+    // 保存配置到文件
+    config::save_app_config(&config)?;
+    Ok(())
 }

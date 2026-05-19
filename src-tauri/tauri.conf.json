@@ -1,18 +1,18 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DataGuard Scanner",
+  "productName": "ContentInspector",
   "version": "../package.json",
-  "identifier": "com.dataguard.scanner",
+  "identifier": "com.content.inspector",
   "build": {
-    "beforeDevCommand": "pnpm --filter dataguard-scanner-frontend dev",
+    "beforeDevCommand": "pnpm --filter content-inspector-frontend dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm --filter dataguard-scanner-frontend build",
+    "beforeBuildCommand": "pnpm --filter content-inspector-frontend build",
     "frontendDist": "../frontend/dist"
   },
   "app": {
     "windows": [
       {
-        "title": "DataGuard Scanner - 敏感数据扫描工具",
+        "title": "ContentInspector - 内容审查官",
         "width": 1024,
         "height": 768,
         "minWidth": 1000,
@@ -36,11 +36,11 @@
       "icons/icon.ico"
     ],
     "resources": [],
-    "publisher": "DataGuard Team",
-    "copyright": "Copyright © 2024 DataGuard Scanner",
+    "publisher": "YiFeng",
+    "copyright": "Copyright © 2026 YiFeng",
     "category": "DeveloperTool",
-    "shortDescription": "Sensitive Data Scanner",
-    "longDescription": "A powerful tool for scanning and detecting sensitive data in files",
+    "shortDescription": "内容审查工具",
+    "longDescription": "内容审查官 - 一款强大的本地内容搜索与审查工具",
     "windows": {
       "webviewInstallMode": {
         "type": "skip"
